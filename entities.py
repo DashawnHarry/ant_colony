@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict
 from config import *
 
-# -------- helpers --------
+# ---------------- helpers ----------------
 def clamp(x, lo, hi): return lo if x < lo else hi if x > hi else x
 def dist2(ax, ay, bx, by): dx, dy = ax - bx, ay - by; return dx*dx + dy*dy
 
@@ -15,16 +15,60 @@ def building_fill_color(btype: str):
     dom = max(cost.items(), key=lambda kv: kv[1])[0]
     return RES_COLORS.get(dom, (200,200,200))
 
-# -------- world objects --------
+def _px(surf, x, y, col):
+    if 0 <= x < WIDTH and 0 <= y < HEIGHT:
+        surf.set_at((int(x), int(y)), col)
+
+# 5x5 pixel icons (centered on building)
+_ICON_TOWER = [
+    "#####",
+    "  #  ",
+    "  #  ",
+    "  #  ",
+    "  #  ",
+]
+_ICON_FARM = [
+    "# # #",
+    " #####",
+    "# # #",
+    " #####",
+    "# # #",
+]
+_ICON_STORAGE = [
+    "#####",
+    "#   #",
+    "#   #",
+    "#   #",
+    "#####",
+]
+
+def _draw_icon(surf, cx, cy, pattern, color):
+    ox, oy = -2, -2  # center 5x5 on (cx,cy)
+    for j, row in enumerate(pattern):
+        for i, ch in enumerate(row):
+            if ch != " ":
+                _px(surf, cx + ox + i, cy + oy + j, color)
+
+# ---------------- world objects ----------------
 @dataclass
 class Resource:
     x: float; y: float; rtype: str
-    def draw(self, surf): pygame.draw.circle(surf, RES_COLORS[self.rtype], (int(self.x), int(self.y)), 2)
+    def draw(self, surf):
+        r = max(1, VIS_RES_R)
+        if r <= 1:
+            _px(surf, int(self.x), int(self.y), RES_COLORS[self.rtype])
+        else:
+            pygame.draw.circle(surf, RES_COLORS[self.rtype], (int(self.x), int(self.y)), r)
 
 @dataclass
 class Food:
     x: float; y: float
-    def draw(self, surf): pygame.draw.circle(surf, FOOD_COLOR, (int(self.x), int(self.y)), 2)
+    def draw(self, surf):
+        r = max(1, VIS_FOOD_R)
+        if r <= 1:
+            _px(surf, int(self.x), int(self.y), FOOD_COLOR)
+        else:
+            pygame.draw.circle(surf, FOOD_COLOR, (int(self.x), int(self.y)), r)
 
 @dataclass
 class Building:
@@ -40,22 +84,41 @@ class Building:
 
     def draw(self, surf):
         fill = building_fill_color(self.btype)
-        outline = TEAM_COLORS[self.team]
+        teamc = TEAM_COLORS[self.team]
+        cx, cy = int(self.x), int(self.y)
+
         if self.btype == "wall":
             x1, y1 = int(self.x - 5), int(self.y)
             x2, y2 = int(self.x + 5), int(self.y)
-            pygame.draw.line(surf, fill,    (x1,y1), (x2,y2), 3)
-            pygame.draw.line(surf, outline, (x1,y1), (x2,y2), 1)
+            pygame.draw.line(surf, fill, (x1,y1), (x2,y2), max(1, VIS_WALL_W))
             return
 
-        r = 12 if self.btype == "home" else 5
-        pygame.draw.circle(surf, fill,    (int(self.x), int(self.y)), r, 0)
-        pygame.draw.circle(surf, outline, (int(self.x), int(self.y)), r, 1)
+        if self.is_home():
+            r_vis = max(3, VIS_HOME_R)
+            # Team-colored ring
+            pygame.draw.circle(surf, teamc, (cx, cy), r_vis, 2 if r_vis >= 4 else 1)
+            # Compact center fill
+            inner = max(1, r_vis - 2)
+            pygame.draw.circle(surf, BUILDING_COLORS["home"], (cx, cy), inner, 0)
+        else:
+            r_vis = max(2, VIS_BUILD_R)
+            pygame.draw.circle(surf, fill, (cx, cy), r_vis, 0)
+            if r_vis >= 2:
+                pygame.draw.circle(surf, teamc, (cx, cy), r_vis, 1)
 
-        if self.btype != "home":
-            w = max(1, int(10*self.hp))
-            pygame.draw.line(surf, outline, (int(self.x)-5, int(self.y)+r+2),
-                                           (int(self.x)-5+w, int(self.y)+r+2))
+            # Micro icon overlay (white for clarity on resource-colored fill)
+            icon_color = (240, 240, 240)
+            if self.btype == "tower":
+                _draw_icon(surf, cx, cy, _ICON_TOWER, icon_color)
+            elif self.btype == "farm":
+                _draw_icon(surf, cx, cy, _ICON_FARM, icon_color)
+            elif self.btype == "storage":
+                _draw_icon(surf, cx, cy, _ICON_STORAGE, icon_color)
+
+        # Optional tiny health tick (off by default)
+        if (not self.is_home()) and DRAW_HEALTH_BARS:
+            w = max(1, int(6*self.hp))  # small
+            pygame.draw.line(surf, teamc, (cx-3, cy + r_vis + 1), (cx-3 + w, cy + r_vis + 1), 1)
 
     def update(self, allies, enemies, buildings, foods):
         if self.btype == "tower":
@@ -91,7 +154,6 @@ class Building:
             if t_left>0:
                 keep.append((t_left-1, role)); continue
             if role == "reproducer":
-                # free, immediate
                 allies.append(Unit(self.x, self.y, self.team, role, self))
                 continue
             if self.stock_food >= REPRODUCE_FOOD_COST:
@@ -110,7 +172,7 @@ class Building:
                 self.stock_food -= eat
                 u.energy = min(1.0, u.energy + eat * ENERGY_PER_FOOD)
 
-# -------- units --------
+# ---------------- units ----------------
 class Unit:
     __slots__ = ("x","y","team","role","home","angle","speed","energy","health",
                  "carry_food","carry_res","wp","wp_t")
@@ -118,11 +180,7 @@ class Unit:
     def __init__(self, x, y, team, role, home: Building):
         self.x=x; self.y=y; self.team=team; self.role=role; self.home=home
         self.angle = random.uniform(0, math.pi*2)
-        # attackers are slower
-        if role == "attacker":
-            self.speed = BASE_SPEED * ATTACKER_SPEED_MULT
-        else:
-            self.speed = BASE_SPEED
+        self.speed = BASE_SPEED * (ATTACKER_SPEED_MULT if role == "attacker" else 1.0)
         self.energy = START_ENERGY
         self.health = START_HEALTH
         self.carry_food = 0
@@ -189,14 +247,12 @@ class Unit:
     # ---- brain ----
     def update(self, foods: List[Food], resources: List[Resource],
                buildings: List[Building], units: List['Unit']):
-        # energy decay (role-based; repro can't die from starvation)
         decay = 0.0 if self.role == "reproducer" else ENERGY_DECAY * ROLE_DECAY.get(self.role, ROLE_DECAY["default"])
         self.energy -= decay
         if self.role != "reproducer" and self.energy <= 0:
             self.health -= HEALTH_DECAY_WHEN_STARVING
 
         if self.health <= 0:
-            # always ensure a repro is available
             if self.role == "reproducer":
                 self.home.respawn_q.append((1, "reproducer"))
             else:
@@ -213,7 +269,6 @@ class Unit:
         if self._too_far_from_home():
             self.move_towards_point(self.home.x, self.home.y); return True
 
-        # role behaviours
         if self.role == "scavenger":
             self._tick_scavenger(foods)
         elif self.role == "builder":
@@ -221,7 +276,7 @@ class Unit:
         elif self.role == "defender":
             self._tick_defender(units)
         elif self.role == "attacker":
-            self._tick_attacker(buildings, resources, units)  # <-- units now passed in
+            self._tick_attacker(buildings, resources, units)
         elif self.role == "reproducer":
             self._tick_reproducer(units)
 
@@ -305,11 +360,9 @@ class Unit:
             self.move_towards_point(tx, ty)
 
     def _tick_attacker(self, buildings, resources, units):
-        # 1) bring salvage home
         if any(self.carry_res.values()):
             self._head_home(); return
 
-        # 2) PRIORITY: enemy units (never reproducer bias)
         enemy_units = [u for u in units if u.team != self.team and u.role != "reproducer"]
         if enemy_units:
             tgt = min(enemy_units, key=lambda e: dist2(self.x,self.y,e.x,e.y))
@@ -318,7 +371,6 @@ class Unit:
                 tgt.health -= 0.06
             return
 
-        # 3) Otherwise enemy buildings EXCEPT homes
         targets = [b for b in buildings if b.team != self.team and b.btype != "home"]
         if targets:
             tgt = min(targets, key=lambda b: dist2(self.x,self.y,b.x,b.y))
@@ -333,7 +385,6 @@ class Unit:
                     buildings.remove(tgt)
             return
 
-        # 4) Nothing to attack → wander
         if not self.wp or self.wp_t <= 0: self._pick_waypoint()
         self.move_towards_point(self.wp[0], self.wp[1]); self.wp_t -= 1
 
@@ -348,5 +399,9 @@ class Unit:
 
     # ---- render ----
     def draw(self, surf):
-        pygame.draw.circle(surf, (0,0,0), (int(self.x), int(self.y)), 2)
-        pygame.draw.circle(surf, TEAM_COLORS[self.team], (int(self.x), int(self.y)), 2)
+        r = max(1, VIS_UNIT_R)
+        x, y = int(self.x), int(self.y)
+        if r <= 1:
+            _px(surf, x, y, TEAM_COLORS[self.team])
+        else:
+            pygame.draw.circle(surf, TEAM_COLORS[self.team], (x, y), r)
