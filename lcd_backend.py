@@ -29,12 +29,10 @@ class LCDBackend:
     def _d(self, data):
         G.output(LCD_DC, 1)
         if isinstance(data, (bytes, bytearray)):
-            # split to safe chunks
             for i in range(0, len(data), 4096):
                 self.spi.writebytes(data[i:i+4096])
         else:
-            # list/iterable of ints
-            buf = list(data)
+            buf = bytes(data) if not isinstance(data, (bytes, bytearray)) else data
             for i in range(0, len(buf), 4096):
                 self.spi.writebytes(buf[i:i+4096])
 
@@ -55,20 +53,24 @@ class LCDBackend:
     def blit_surface(self, surface):
         """Convert a pygame Surface (WIDTH x HEIGHT) to RGB565 and push."""
         import pygame
-        # RGB 24-bit bytes (row-major)
-        rgb_bytes = pygame.image.tostring(surface, "RGB")
+        rgb_bytes = pygame.image.tostring(surface, "RGB")  # row-major RGB888
         arr = np.frombuffer(rgb_bytes, dtype=np.uint8).reshape((HEIGHT, WIDTH, 3))
-        r = arr[:,:,0].astype(np.uint16)
-        g = arr[:,:,1].astype(np.uint16)
-        b = arr[:,:,2].astype(np.uint16)
+
+        # Convert to RGB565
+        r = arr[:, :, 0].astype(np.uint16)
+        g = arr[:, :, 1].astype(np.uint16)
+        b = arr[:, :, 2].astype(np.uint16)
         rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
-        # interleave MSB/LSB
-        out = np.empty(self.W*self.H*2, dtype=np.uint8)
-        out[0::2] = (rgb565 >> 8).astype(np.uint8)
-        out[1::2] = (rgb565 & 0xFF).astype(np.uint8)
+
+        # Interleave MSB/LSB into a flat buffer
+        hi = (rgb565 >> 8).astype(np.uint8).ravel()
+        lo = (rgb565 & 0xFF).astype(np.uint8).ravel()
+        out = np.empty(self.W * self.H * 2, dtype=np.uint8)
+        out[0::2] = hi
+        out[1::2] = lo
 
         self._c(0x2C)           # RAM write
-        self._d(out.tobytes())  # chunked inside ._d
+        self._d(out.tobytes())  # chunked inside _d
 
     def close(self):
         try:
